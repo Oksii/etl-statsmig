@@ -126,12 +126,11 @@ func upgradeFile(inputPath, inputRoot, outputRoot string) error {
 		anyUpgraded = true
 	}
 
-	// Inject metadata.scores for upgraded files only.
-	// Pass-through files (anyUpgraded == false) already have authoritative scores
-	// from the native Lua module and must not be overwritten.
-	// The mismatch warning from applyScoresToFile is intentionally discarded here:
-	// match.alpha_score/beta_score/winner in old 1.2.4 files were written by the
-	// old scoring system and are not comparable to our new algorithm's output.
+	// Inject metadata.scores and overwrite match-level alpha_score/beta_score/winner
+	// for upgraded files only. Pass-through files (anyUpgraded == false) already have
+	// authoritative scores from the native Lua module and must not be touched.
+	// The mismatch warning is discarded: old 1.2.4 match-level scores came from the
+	// old Lua system and are replaced unconditionally by our computed values.
 	if anyUpgraded {
 		rounds, _ = applyScoresToFile(rounds, matchMap)
 	}

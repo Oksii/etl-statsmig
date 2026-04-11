@@ -366,6 +366,17 @@ func applyScoresToFile(rounds []map[string]json.RawMessage, matchMap map[string]
 				warn = fmt.Sprintf("winner mismatch: computed %q vs stored %q", final.MatchWinner, storedWinner)
 			}
 		}
+
+		// Overwrite match-level fields with authoritative computed values.
+		if ab, err := json.Marshal(final.Alpha); err == nil {
+			matchMap["alpha_score"] = ab
+		}
+		if bb, err := json.Marshal(final.Beta); err == nil {
+			matchMap["beta_score"] = bb
+		}
+		if wb, err := json.Marshal(final.MatchWinner); err == nil {
+			matchMap["winner"] = wb
+		}
 	}
 
 	return rounds, warn
