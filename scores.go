@@ -374,7 +374,18 @@ func applyScoresToFile(rounds []map[string]json.RawMessage, matchMap map[string]
 		if bb, err := json.Marshal(final.Beta); err == nil {
 			matchMap["beta_score"] = bb
 		}
-		if wb, err := json.Marshal(final.MatchWinner); err == nil {
+		computedWinner := final.MatchWinner
+		if computedWinner == "" {
+			switch {
+			case final.Alpha > final.Beta:
+				computedWinner = "alpha"
+			case final.Beta > final.Alpha:
+				computedWinner = "beta"
+			default:
+				computedWinner = "draw"
+			}
+		}
+		if wb, err := json.Marshal(computedWinner); err == nil {
 			matchMap["winner"] = wb
 		}
 	}
