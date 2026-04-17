@@ -19,6 +19,7 @@ Commands:
   validate    Validate upgraded files against old originals (and optionally new-format references)
   rescore     Inject/update metadata.scores in already-upgraded files (in-place)
   scorecheck  Dry-run scoring algorithm against reference files and report pass/fail
+  desanitize  Decode Lua \\u{hex} escape sequences in JSON files back to UTF-8
 
 Run 'etl-statsmig <command> --help' for command-specific flags.
 
@@ -29,6 +30,8 @@ Examples:
   etl-statsmig validate --in ./old --out ./out --ref ./new --verbose
   etl-statsmig rescore --in ./out
   etl-statsmig scorecheck --ref ./ref
+  etl-statsmig desanitize --in ./ref --out ./ref-clean
+  etl-statsmig desanitize --in ./ref
 `
 
 func main() {
@@ -46,6 +49,8 @@ func main() {
 		runRescoreCmd(os.Args[2:])
 	case "scorecheck":
 		runScorecheckCmd(os.Args[2:])
+	case "desanitize":
+		runDesanitizeCmd(os.Args[2:])
 	case "--help", "-h", "help":
 		fmt.Print(usage)
 	default:
@@ -59,6 +64,8 @@ func runUpgradeCmd(args []string) {
 	inputDir := fs.String("in", "", "Input directory to walk recursively (required)")
 	outputDir := fs.String("out", "", "Output directory mirroring input structure (required)")
 	workers := fs.Int("workers", runtime.NumCPU(), "Number of parallel worker goroutines")
+	apiToken := fs.String("api-token", "GameStatsWebLuaToken", "Bearer token for ETL API (used to infer team names)")
+	apiBase := fs.String("api-base", etlAPIBase, "ETL API base URL")
 	fs.Parse(args) //nolint: errcheck
 
 	if *inputDir == "" || *outputDir == "" {
@@ -80,6 +87,8 @@ func runUpgradeCmd(args []string) {
 		log.Fatalf("create output dir: %v", err)
 	}
 
+	cfg := upgradeConfig{apiToken: *apiToken, apiBase: *apiBase}
+
 	jobs := make(chan string, *workers*8)
 
 	var (
@@ -93,7 +102,7 @@ func runUpgradeCmd(args []string) {
 		go func() {
 			defer wg.Done()
 			for path := range jobs {
-				if err := upgradeFile(path, inputRoot, outputRoot); err != nil {
+				if err := upgradeFile(path, inputRoot, outputRoot, cfg); err != nil {
 					log.Printf("ERROR %s: %v", path, err)
 					atomic.AddUint64(&errCount, 1)
 				}

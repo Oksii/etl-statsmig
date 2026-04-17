@@ -55,6 +55,8 @@ etl-statsmig upgrade --in <dir> --out <dir> [--workers N]
 | `--in` | (required) | Source directory. Walked recursively for `*.json` files. |
 | `--out` | (required) | Destination directory. Input directory structure is mirrored exactly. |
 | `--workers` | `runtime.NumCPU()` | Number of parallel goroutines. Increase for I/O-bound storage. |
+| `--api-token` | `ExampleToken` | Bearer token for the ETL API used to infer team names. |
+| `--api-base` | `https://api.etl.lol` | ETL API base URL override (useful for staging/testing). |
 
 **Examples:**
 
@@ -140,6 +142,43 @@ etl-statsmig scorecheck --ref /data/stats/new_reference_samples
 
 ---
 
+### `desanitize` — Decode Lua `\u{hex}` escape sequences
+
+```
+etl-statsmig desanitize --in <dir> [--out <dir>] [--workers N]
+```
+
+Walks a directory of JSON files and decodes Lua-style `\u{hex}` escape sequences back to their original UTF-8 characters. These sequences were produced by an old Lua sanitizer that encoded non-ASCII bytes individually (e.g. `ö` → `\u{c3}\u{b6}`). This command is for cleaning **already-upgraded** files. For files being upgraded fresh, desanitization runs automatically as the first step of `upgrade`.
+
+**Flags:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--in` | (required) | Source directory. Walked recursively for `*.json` files. |
+| `--out` | (optional) | Output directory. If omitted, files are overwritten in place. |
+| `--workers` | `runtime.NumCPU()` | Number of parallel goroutines. |
+
+**Examples:**
+
+```bash
+# Write cleaned files to a new directory
+etl-statsmig desanitize --in /data/stats/upgraded --out /data/stats/clean
+
+# Overwrite in place
+etl-statsmig desanitize --in /data/stats/upgraded
+```
+
+**Behaviour:**
+
+- All string values in the JSON are walked recursively — `name`, `nick`, `message`, team names, and any other string field are all cleaned.
+- Multi-byte UTF-8 sequences encoded as adjacent byte-range escapes (e.g. `\u{c3}\u{b6}` → `ö`) are grouped and decoded correctly.
+- Codepoints above 0xFF (e.g. `\u{228}` → `Ȩ`) are treated as direct Unicode codepoints.
+- Standard JSON `\uXXXX` escapes (already decoded by the JSON parser) are unaffected.
+- File mtime is preserved on output.
+- Exits with code `1` if any file errored.
+
+---
+
 ### `validate` — Validate upgraded files
 
 ```
@@ -175,6 +214,10 @@ etl-statsmig validate --in /data/stats/old --out /data/stats/upgraded --ref /dat
 ## What the Upgrade Does
 
 For every `*.json` file found recursively in `--in`, the upgrader:
+
+### 0. Desanitizes all string fields
+
+Before any other processing, all `\u{hex}` Lua escape sequences in every string value are decoded to their original UTF-8 characters (see [`desanitize`](#desanitize--decode-lua-uhex-escape-sequences)). This must happen first so that subsequent steps — including team name inference — operate on clean strings.
 
 ### 1. Detects already-upgraded files
 
@@ -310,7 +353,17 @@ timestamp_unix_seconds = round_start_unix + (leveltime − round_start) / 1000
 
 Returns `0` and omits upgrading when `round_start_unix` is absent.
 
-### 7. Restores file modification time
+### 7. Infers `alpha_teamname` / `beta_teamname`
+
+Old-format files lack team name fields at the match level. The upgrader infers them automatically as part of the upgrade pipeline (no separate pass required):
+
+1. **API lookup** — queries the ETL API (`/api/v2/stats/etl/players/by-id`) with the Discord IDs of all team members from `match.alpha_team` / `match.beta_team`. For each player returned, their `user_tag_no_separator` and `user_tag` alternatives are tested against the in-game names observed in round 1. A tag alternative may contain a `{name}` placeholder; the prefix before it (stripped of ET color codes and trailing separator characters) must match the start of the in-game name. On a match, the colored prefix is extracted directly from the in-game name to preserve the player's own color codes.
+
+2. **Fallback — longest common prefix** — if no API tag matches (e.g. player has no registered tags), the longest common prefix of all stripped in-game names on that ET team in round 1 is computed (case-insensitively), trailing separator characters are stripped, and the result is mapped back to the colored form of the first name.
+
+The inferred names are written to `match.alpha_teamname` / `match.beta_teamname` and flow into all `metadata.scores` payloads via the scoring step. Existing non-empty values are never overwritten (pass-through files with correct team names are left unchanged).
+
+### 8. Restores file modification time
 
 After writing the output file, the tool calls `os.Chtimes` to set both `atime` and `mtime`:
 
@@ -460,13 +513,15 @@ To verify the scoring algorithm independently against reference files:
 
 ```
 etl-statsmig/
-  main.go      # CLI entry point and subcommand dispatch
-  upgrade.go   # Core upgrade logic: upgradeFile, upgradeRoundData, buildGamelog
-  validate.go  # Validation logic: per-check functions, schema comparison
-  scores.go    # Scoring algorithm, rescore and scorecheck subcommands
-  types.go     # All Go struct definitions and constants
-  go.mod       # Module definition (no external dependencies)
-  README.md    # This file
+  main.go           # CLI entry point and subcommand dispatch
+  upgrade.go        # Core upgrade logic: upgradeFile, upgradeRoundData, buildGamelog
+  desanitize.go     # Lua \u{hex} decoder: desanitizeLuaString, desanitizeAny, desanitize command
+  teamnames.go      # Team name inference: ETL API lookup and common-prefix fallback
+  validate.go       # Validation logic: per-check functions, schema comparison
+  scores.go         # Scoring algorithm, rescore and scorecheck subcommands
+  types.go          # All Go struct definitions and constants
+  go.mod         # Module definition (no external dependencies)
+  README.md      # This file
 ```
 
 ---

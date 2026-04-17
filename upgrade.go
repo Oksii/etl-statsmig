@@ -46,12 +46,43 @@ var objGamelogLabels = []string{
 	"obj_flagcaptured",
 }
 
+// upgradeConfig holds API configuration for the upgrade pipeline.
+type upgradeConfig struct {
+	apiToken string
+	apiBase  string
+}
+
+// hasNonEmptyString reports whether key exists in m with a non-null, non-empty JSON string value.
+func hasNonEmptyString(m map[string]json.RawMessage, key string) bool {
+	v, ok := m[key]
+	if !ok {
+		return false
+	}
+	var s string
+	if err := json.Unmarshal(v, &s); err != nil {
+		return false // null or non-string
+	}
+	return s != ""
+}
+
 // upgradeFile reads an old-format JSON file, upgrades it, writes to the
 // mirrored path under outputRoot, and restores file mtime from match timestamps.
-func upgradeFile(inputPath, inputRoot, outputRoot string) error {
-	data, err := os.ReadFile(inputPath)
+func upgradeFile(inputPath, inputRoot, outputRoot string, cfg upgradeConfig) error {
+	raw, err := os.ReadFile(inputPath)
 	if err != nil {
 		return fmt.Errorf("read: %w", err)
+	}
+
+	// Decode Lua \u{hex} escape sequences before parsing so all string fields
+	// in the output are clean UTF-8.
+	var rootAny interface{}
+	if err := json.Unmarshal(raw, &rootAny); err != nil {
+		return fmt.Errorf("pre-parse for desanitize: %w", err)
+	}
+	rootAny = desanitizeAny(rootAny)
+	data, err := json.Marshal(rootAny)
+	if err != nil {
+		return fmt.Errorf("re-marshal after desanitize: %w", err)
 	}
 
 	// Parse as map to preserve all top-level fields
@@ -132,6 +163,15 @@ func upgradeFile(inputPath, inputRoot, outputRoot string) error {
 	// The mismatch warning is discarded: old 1.2.4 match-level scores came from the
 	// old Lua system and are replaced unconditionally by our computed values.
 	if anyUpgraded {
+		if !hasNonEmptyString(matchMap, "alpha_teamname") {
+			alphaTN, betaTN := inferTeamNames(rounds, matchMap, cfg.apiToken, cfg.apiBase, inputPath)
+			if alphaTN != "" {
+				matchMap["alpha_teamname"], _ = json.Marshal(alphaTN)
+			}
+			if betaTN != "" {
+				matchMap["beta_teamname"], _ = json.Marshal(betaTN)
+			}
+		}
 		rounds, _ = applyScoresToFile(rounds, matchMap)
 	}
 
