@@ -18,12 +18,12 @@ const etlAPIBase = "https://api.etl.lol"
 
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
-// colorCodeRe matches ET/ETLegacy color escape sequences.
-// Standard codes use ^ followed by [0-9a-zA-Z~]. ETLegacy mods extend this
-// with additional chars; we include the ones observed in match data.
-// ^= and ^\ are intentionally excluded as they appear as separator-color
-// prefixes where the separator chars themselves must remain as plain text.
-var colorCodeRe = regexp.MustCompile(`\^[0-9a-zA-Z~><\[\]@_]`)
+// colorCodeRe matches a Quake3/ETL colour code: ^ followed by any non-whitespace,
+// non-caret character. The full colour table spans all printable ASCII (!–~) plus
+// Latin extended characters (°, Ñ, ÿ, etc.). ^^ is excluded: the engine treats the
+// first ^ as a literal because the next char is ^, so the second ^ pairs with whatever
+// follows — e.g. ^^7 → ^ (literal) + ^7 stripped.
+var colorCodeRe = regexp.MustCompile(`\^[^\s^]`)
 
 // ETLPlayer holds the fields we use from the ETL API player response.
 type ETLPlayer struct {
