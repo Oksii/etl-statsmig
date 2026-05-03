@@ -173,6 +173,10 @@ func upgradeFile(inputPath, inputRoot, outputRoot string, cfg upgradeConfig) err
 			}
 		}
 		rounds, _ = applyScoresToFile(rounds, matchMap)
+	} else if roundsMissingScores(rounds) {
+		// v2 file: gamelog present but metadata.scores.round absent — inject scores only.
+		// This handles servers with auto_scores disabled that emit v2 format without scores.
+		rounds, _ = applyScoresToFile(rounds, matchMap)
 	}
 
 	roundsBytes, err := json.Marshal(rounds)
@@ -561,6 +565,41 @@ func upgradeAllPlayerStats(playerMaps map[string]map[string]json.RawMessage, ri 
 	}
 }
 
+
+// roundsMissingScores reports whether any round has non-empty metadata but no
+// metadata.scores.round — the signature of a v2 file from a server with auto_scores disabled.
+func roundsMissingScores(rounds []map[string]json.RawMessage) bool {
+	for _, round := range rounds {
+		rdRaw, ok := round["round_data"]
+		if !ok {
+			continue
+		}
+		var rd map[string]json.RawMessage
+		if err := json.Unmarshal(rdRaw, &rd); err != nil {
+			continue
+		}
+		metaRaw, ok := rd["metadata"]
+		if !ok || len(metaRaw) <= 2 {
+			continue
+		}
+		var meta map[string]json.RawMessage
+		if err := json.Unmarshal(metaRaw, &meta); err != nil {
+			continue
+		}
+		scoresRaw, hasScores := meta["scores"]
+		if !hasScores || string(scoresRaw) == "null" {
+			return true
+		}
+		var scores map[string]json.RawMessage
+		if err := json.Unmarshal(scoresRaw, &scores); err != nil {
+			return true
+		}
+		if _, hasRound := scores["round"]; !hasRound {
+			return true
+		}
+	}
+	return false
+}
 
 // upgradeShoveMap converts old shove format {lt: guid_string} to new {lt: {objective, timestamp_unix}}.
 // Returns nil if no changes needed.
