@@ -42,6 +42,10 @@ type scoreRoundInput struct {
 	Winnerteam int
 	Timelimit  string
 	NextTL     string
+	// AlphaSide is the ET team (1=axis, 2=allies) that the alpha team played
+	// as in this round, derived from player_stats. Zero falls back to the
+	// alphaExpectedSide formula at compute time.
+	AlphaSide int
 }
 
 type fullholdEntry struct {
@@ -90,15 +94,18 @@ func computeMatchScores(rounds []scoreRoundInput, alphaTN, betaTN string, ngMode
 		// Detect "fullhold r2 recorded as r1" — a bug in the old Lua module where the
 		// second half of a fullhold map was stored with round_info.round=1 instead of 2.
 		// When two consecutive file-round=1 entries appear and the first was a fullhold,
-		// the second is actually r2 (sides swapped). Use effectiveRoundNum=2 for alpha_side
-		// computation only; scoring still uses r.RoundNum to replicate the Lua's behavior
-		// and match cumulative scores already stored in upgraded reference files.
+		// the second is actually r2 (sides swapped). Tracked for fallback only; if the
+		// caller supplied a per-round AlphaSide derived from player_stats, that value is
+		// authoritative and the effectiveRoundNum hack isn't needed.
 		effectiveRoundNum := r.RoundNum
 		if r.RoundNum == 1 && prevFileRoundNum == 1 && prevFullhold {
 			effectiveRoundNum = 2
 		}
 
-		alphaSide := alphaExpectedSide(mapNum, effectiveRoundNum)
+		alphaSide := r.AlphaSide
+		if alphaSide != 1 && alphaSide != 2 {
+			alphaSide = alphaExpectedSide(mapNum, effectiveRoundNum)
+		}
 		alphaWon := r.Winnerteam == alphaSide
 		winner := "beta"
 		if alphaWon {
@@ -221,9 +228,90 @@ func extractTeamNames(matchMap map[string]json.RawMessage) (alphaTN, betaTN stri
 	return
 }
 
+// readPlayerStatsTeams parses round.round_data.player_stats and returns
+// guid → team-string ("1" or "2"). Old- and new-format files both store team
+// as a JSON string at this stage of the pipeline.
+func readPlayerStatsTeams(round map[string]json.RawMessage) map[string]string {
+	out := map[string]string{}
+	rdRaw, ok := round["round_data"]
+	if !ok {
+		return out
+	}
+	var rd map[string]json.RawMessage
+	if json.Unmarshal(rdRaw, &rd) != nil {
+		return out
+	}
+	psRaw, ok := rd["player_stats"]
+	if !ok {
+		return out
+	}
+	var psMap map[string]map[string]json.RawMessage
+	if json.Unmarshal(psRaw, &psMap) != nil {
+		return out
+	}
+	for guid, pm := range psMap {
+		v, ok := pm["team"]
+		if !ok {
+			continue
+		}
+		var t string
+		if json.Unmarshal(v, &t) == nil {
+			out[guid] = t
+		}
+	}
+	return out
+}
+
+// bootstrapAlphaGUIDs returns the set of GUIDs whose player_stats[].team in
+// the given round matches bootSide. Used to seed alpha-team identity from
+// round 1 of map 1 under the convention alphaExpectedSide(1,1).
+func bootstrapAlphaGUIDs(round map[string]json.RawMessage, bootSide int) map[string]struct{} {
+	set := map[string]struct{}{}
+	bootStr := "1"
+	if bootSide == 2 {
+		bootStr = "2"
+	}
+	for guid, t := range readPlayerStatsTeams(round) {
+		if t == bootStr {
+			set[guid] = struct{}{}
+		}
+	}
+	return set
+}
+
+// alphaSideFromPlayerStats finds any GUID from alphaGUIDs in this round's
+// player_stats and returns its team (1 or 2). Returns 0 if none are present
+// — caller should fall back to alphaExpectedSide.
+func alphaSideFromPlayerStats(round map[string]json.RawMessage, alphaGUIDs map[string]struct{}) int {
+	if len(alphaGUIDs) == 0 {
+		return 0
+	}
+	teams := readPlayerStatsTeams(round)
+	for guid := range alphaGUIDs {
+		switch teams[guid] {
+		case "1":
+			return 1
+		case "2":
+			return 2
+		}
+	}
+	return 0
+}
+
 // collectScoreInputs reads round_info from each round and returns scoreRoundInputs.
+// AlphaSide is derived from player_stats per round, bootstrapped from round 1
+// of map 1 using the convention alphaExpectedSide(1,1). Falls back to the
+// formula when player_stats can't supply a value (e.g., bootstrap empty,
+// alpha-team GUIDs missing from a later round).
 func collectScoreInputs(rounds []map[string]json.RawMessage) []scoreRoundInput {
 	inputs := make([]scoreRoundInput, 0, len(rounds))
+
+	var alphaGUIDs map[string]struct{}
+	if len(rounds) > 0 {
+		alphaGUIDs = bootstrapAlphaGUIDs(rounds[0], alphaExpectedSide(1, 1))
+	}
+	processed := 0
+
 	for _, round := range rounds {
 		rdRaw, ok := round["round_data"]
 		if !ok {
@@ -246,11 +334,20 @@ func collectScoreInputs(rounds []map[string]json.RawMessage) []scoreRoundInput {
 		if err := json.Unmarshal(riRaw, &ri); err != nil {
 			continue
 		}
+
+		side := alphaSideFromPlayerStats(round, alphaGUIDs)
+		if side == 0 {
+			mapNum := processed/2 + 1
+			side = alphaExpectedSide(mapNum, ri.Round)
+		}
+		processed++
+
 		inputs = append(inputs, scoreRoundInput{
 			RoundNum:   ri.Round,
 			Winnerteam: ri.Winnerteam,
 			Timelimit:  ri.Timelimit,
 			NextTL:     ri.NextTimeLimit,
+			AlphaSide:  side,
 		})
 	}
 	return inputs
@@ -615,6 +712,12 @@ func scorecheckFile(path string) (passed, failed int, failLines []string, err er
 	}
 	var refRounds []refRound
 
+	var alphaGUIDs map[string]struct{}
+	if len(rounds) > 0 {
+		alphaGUIDs = bootstrapAlphaGUIDs(rounds[0], alphaExpectedSide(1, 1))
+	}
+	processed := 0
+
 	for _, round := range rounds {
 		rdRaw, ok := round["round_data"]
 		if !ok {
@@ -638,11 +741,19 @@ func scorecheckFile(path string) (passed, failed int, failLines []string, err er
 			continue
 		}
 
+		side := alphaSideFromPlayerStats(round, alphaGUIDs)
+		if side == 0 {
+			mapNum := processed/2 + 1
+			side = alphaExpectedSide(mapNum, ri.Round)
+		}
+		processed++
+
 		inp := scoreRoundInput{
 			RoundNum:   ri.Round,
 			Winnerteam: ri.Winnerteam,
 			Timelimit:  ri.Timelimit,
 			NextTL:     ri.NextTimeLimit,
+			AlphaSide:  side,
 		}
 
 		var stored *RoundScores
